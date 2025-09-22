@@ -42,7 +42,7 @@ const fastify = Fastify({
 // CORS configuration
 const allowedOrigins =
   process.env.NODE_ENV === "production"
-    ? [process.env.FRONTEND_URL, "https://insta-web-wj98.vercel.app/"]
+    ? [process.env.FRONTEND_URL, "https://insta-server-9a05.onrender.com"]
     : true;
 
 await fastify.register(cors, {
