@@ -1,6 +1,15 @@
-console.log("STARTING SERVICE...");
-process.on("uncaughtException", console.error);
-process.on("unhandledRejection", console.error);
+console.log("STARTING INSTAGRAM CLONE SERVICE...");
+
+// Graceful error handling
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
@@ -24,11 +33,28 @@ dotenv.config();
 const pump = util.promisify(pipeline);
 
 const fastify = Fastify({
-  logger: true,
+  logger: {
+    level: process.env.NODE_ENV === "production" ? "info" : "debug",
+  },
+  trustProxy: true,
 });
 
-await fastify.register(cors, { origin: true });
-await fastify.register(multipart);
+// CORS configuration
+const allowedOrigins =
+  process.env.NODE_ENV === "production"
+    ? [process.env.FRONTEND_URL, "https://yourdomain.com"]
+    : true;
+
+await fastify.register(cors, {
+  origin: allowedOrigins,
+  credentials: true,
+});
+await fastify.register(multipart, {
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+    files: 1,
+  },
+});
 
 const __dirname = path.resolve(
   path.dirname(decodeURI(new URL(import.meta.url).pathname)),
@@ -40,10 +66,24 @@ fastify.register(fastifyStatic, {
 
 const MONGO_URI =
   process.env.MONGO_URI || "mongodb://localhost:27017/instagram_clone";
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  (() => {
+    if (process.env.NODE_ENV === "production") {
+      console.error("JWT_SECRET must be set in production!");
+      process.exit(1);
+    }
+    return "supersecret";
+  })();
 try {
-  await mongoose.connect(MONGO_URI);
-  console.log("MongoDB connected to", MONGO_URI);
+  await mongoose.connect(MONGO_URI, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    bufferCommands: false,
+    bufferMaxEntries: 0,
+  });
+  console.log("MongoDB connected successfully");
 } catch (err) {
   console.error("Failed to connect to MongoDB:", err);
   process.exit(1);
@@ -57,12 +97,17 @@ const authenticate = async (request, reply) => {
     }
     const token = authHeader.replace("Bearer ", "");
     const decoded = jwt.verify(token, JWT_SECRET);
-    request.user = await User.findOne({ _id: decoded.id });
+    request.user = await User.findOne({ _id: decoded.id }).select("-password");
     if (!request.user) {
-      throw new Error();
+      throw new Error("User not found");
     }
   } catch (err) {
-    reply.code(401).send({ error: "Please authenticate." });
+    const status = err.name === "TokenExpiredError" ? 401 : 401;
+    const message =
+      err.name === "TokenExpiredError"
+        ? "Token expired"
+        : "Please authenticate";
+    reply.code(status).send({ error: message });
   }
 };
 
@@ -85,7 +130,7 @@ fastify.post("/signup", async (request, reply) => {
       await new Post({ username, images: [] }).save();
     }
 
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "24h" });
     return reply.code(201).send({ ok: true, token });
   } catch (err) {
     console.error("/signup error:", err);
@@ -107,7 +152,7 @@ fastify.post("/login", async (request, reply) => {
     if (!valid) {
       return reply.code(401).send({ error: "Username yoki parol xato" });
     }
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "24h" });
     return reply.send({ ok: true, token });
   } catch (err) {
     console.error("/login error:", err);
@@ -200,7 +245,30 @@ fastify.get(
 );
 
 fastify.get("/health", async function (request, reply) {
-  return { ok: true };
+  try {
+    // Check MongoDB connection
+    await mongoose.connection.db.admin().ping();
+    return {
+      ok: true,
+      timestamp: new Date().toISOString(),
+      service: "Instagram Clone Backend",
+      mongodb: "connected",
+    };
+  } catch (err) {
+    reply.code(503).send({
+      ok: false,
+      error: "Service unavailable",
+      mongodb: "disconnected",
+    });
+  }
+});
+
+// Add rate limiting for sensitive endpoints
+fastify.register(async function (fastify) {
+  await fastify.register(import("@fastify/rate-limit"), {
+    max: 100,
+    timeWindow: "1 minute",
+  });
 });
 
 const onClose = async () => {
@@ -217,9 +285,13 @@ process.on("SIGTERM", onClose);
 
 try {
   const port = Number(process.env.PORT || 3001);
-  await fastify.listen({ port, host: "0.0.0.0" });
-  console.log(`Server listening on ${port}`);
+  const host = process.env.HOST || "0.0.0.0";
+
+  await fastify.listen({ port, host });
+  console.log(`🚀 Instagram Clone Backend running on http://${host}:${port}`);
+  console.log(`📁 Static files served from: /uploads/`);
+  console.log(`🔧 Environment: ${process.env.NODE_ENV || "development"}`);
 } catch (err) {
-  fastify.log.error(err);
+  fastify.log.error("Failed to start server:", err);
   process.exit(1);
 }

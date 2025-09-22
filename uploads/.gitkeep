@@ -1,0 +1,3 @@
+# This file exists to ensure the uploads directory is tracked by Git
+# The uploads directory is needed for storing user-uploaded images
+# but the actual upload files should not be committed to version control
